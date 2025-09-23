@@ -1,8 +1,0 @@
-.\processing.py:462:48: E999 IndentationError: unindent does not match any outer indentation level
-.\test_suite.py:18:6: E999 SyntaxError: invalid syntax
-.\utils.py:103:20: F821 undefined name 'requests'
-.\utils.py:106:12: F821 undefined name 'requests'
-.\utils.py:121:20: F821 undefined name 'requests'
-.\utils.py:138:30: F821 undefined name 'requests'
-.\utils.py:148:33: F821 undefined name 'base64'
-.\utils.py:151:12: F821 undefined name 'requests'

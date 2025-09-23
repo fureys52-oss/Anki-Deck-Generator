@@ -5,6 +5,9 @@ echo =======================================================
 echo  Anki Deck Generator - TARGETED BUG CHECK
 echo =======================================================
 
+REM Ensure the script runs relative to its own location
+cd /d "%~dp0"
+
 REM Create the reports directory if it doesn't exist
 if not exist "quality_reports" mkdir "quality_reports"
 
@@ -14,7 +17,8 @@ call venv\Scripts\activate
 
 REM Generate a timestamp for the log file
 echo Generating timestamp...
-set TIMESTAMP=%date:~10,4%%date:~4,2%%date:~7,2%_%time:~0,2%%time:~3,2%%time:~6,2%
+for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /format:list') do set datetime=%%I
+set TIMESTAMP=%datetime:~0,8%_%datetime:~8,6%
 set LOG_FILE=quality_reports\critical_errors_%TIMESTAMP%.txt
 
 REM =================================================================
@@ -29,21 +33,21 @@ flake8 . --select=F,E9 --exclude=venv,.git,__pycache__,.vscode,.vs > %LOG_FILE%
 echo.
 echo Analysis complete.
 
-REM Check if the report file is empty or not
-for %%A in (%LOG_FILE%) do set FileSize=%%~zA
-if %FileSize% equ 0 (
-    echo.
-    echo =======================================================
-    echo  RESULT: SUCCESS! No critical bugs found in your code.
-    echo =======================================================
-    del %LOG_FILE%
-) else (
+REM Check if the report file contains any content.
+findstr . "%LOG_FILE%" >nul
+if %errorlevel% equ 0 (
     echo.
     echo =======================================================
     echo  RESULT: WARNING! Critical bugs found.
     echo  Opening report: %LOG_FILE%
     echo =======================================================
-    start "" %LOG_FILE%
+    start "" "%LOG_FILE%"
+) else (
+    echo.
+    echo =======================================================
+    echo  RESULT: SUCCESS! No critical bugs found in your code.
+    echo =======================================================
+    del "%LOG_FILE%"
 )
 
 echo.

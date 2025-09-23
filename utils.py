@@ -1,4 +1,4 @@
-﻿# utils.py (Final Optimized Version)
+﻿# utils.py
 
 import os
 import shutil
@@ -12,11 +12,12 @@ from typing import Dict, Tuple, List, Any
 from dotenv import load_dotenv
 import gradio as gr
 from PIL import Image
+import pytesseract
 
 # --- Global Constants for Image Heuristics ---
-MIN_IMAGE_SIZE_BYTES = 10 * 1024
+MIN_IMAGE_SIZE_BYTES = 5 * 1024
 MAX_ASPECT_RATIO = 3.0
-MAX_IMAGE_DIMENSION = 1000 # Max width/height for optimized images
+MAX_IMAGE_DIMENSION = 1000
 
 # --- File and Cache Management ---
 def manage_log_files(log_dir: Path, max_logs: int):
@@ -125,20 +126,16 @@ def optimize_image(image_bytes: bytes) -> bytes | None:
     try:
         image = Image.open(io.BytesIO(image_bytes))
         
-        # Add white background to transparent images before any processing
         if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
             background = Image.new("RGB", image.size, (255, 255, 255))
             background.paste(image, (0, 0), image.convert("RGBA"))
             image = background
         
-        # Ensure image is in RGB mode for saving as JPEG
         image = image.convert("RGB")
 
-        # Resize the image if it's too large
         if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
             image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
         
-        # Save the optimized image to a byte buffer
         byte_arr = io.BytesIO()
         image.save(byte_arr, format='JPEG', quality=85, optimize=True)
         return byte_arr.getvalue()
@@ -159,7 +156,8 @@ def download_image(url: str) -> bytes | None:
 def search_wikimedia_for_image(query: str) -> str | None:
     WIKIMEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
     headers = {'User-Agent': 'AnkiDeckGenerator/1.0'}
-    params = {"action": "query", "format": "json", "list": "search", "srsearch": query, "srnamespace": "6", "srlimit": "5"}
+    search_query = f"{query} english diagram"
+    params = {"action": "query", "format": "json", "list": "search", "srsearch": search_query, "srnamespace": "6", "srlimit": "5"}
     
     try:
         response = requests.get(WIKIMEDIA_API_URL, params=params, timeout=10, headers=headers)
@@ -179,17 +177,15 @@ def search_wikimedia_for_image(query: str) -> str | None:
         all_images_info = [page["imageinfo"][0] for page in image_data.values() if "imageinfo" in page]
         if not all_images_info: return None
         
-        # Prioritize larger files as they are more likely to be high quality
         sorted_candidates = sorted(all_images_info, key=lambda x: x["size"], reverse=True)
 
         for candidate in sorted_candidates:
             image_bytes = download_image(candidate["url"])
             if not image_bytes: continue
 
-            # Use a simple size check for SVGs, our full heuristic for others
             is_valid = False
             if candidate["mime"] == "image/svg+xml":
-                if len(image_bytes) > 2048: # SVG must be at least 2KB
+                if len(image_bytes) > 2048:
                     is_valid = True
             else:
                 if is_image_high_quality_heuristic(image_bytes):
@@ -199,10 +195,18 @@ def search_wikimedia_for_image(query: str) -> str | None:
                 optimized_bytes = optimize_image(image_bytes)
                 if optimized_bytes:
                     b64_image = base64.b64encode(optimized_bytes).decode('utf-8')
-                    # Return as JPEG since our optimizer converts everything
                     return f'<img src="data:image/jpeg;base64,{b64_image}">'
         
     except requests.RequestException as e:
         print(f"Error searching Wikimedia: {e}")
     
     return None
+
+def perform_ocr_on_image(image_bytes: bytes) -> str:
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        text = pytesseract.image_to_string(image)
+        return text
+    except Exception as e:
+        print(f"Error during OCR processing: {e}")
+        return ""

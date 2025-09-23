@@ -4,7 +4,7 @@ from pathlib import Path
 from ui import build_ui
 
 # --- Global Configuration ---
-SCRIPT_VERSION = "2.6.2 (Stable Release Candidate)"
+SCRIPT_VERSION = "3.0.0 RC1"
 PDF_CACHE_DIR = Path(".pdf_cache")
 AI_CACHE_DIR = Path(".ai_cache")
 LOG_DIR = Path("logs")
@@ -25,4 +25,4 @@ if __name__ == "__main__":
         max_log_files=MAX_LOG_FILES
     )
     
-    app.launch(server_name="127.0.0.1", server_port=7860, debug=True, inbrowser=True)
+    app.launch(server_name="127.0.0.1", debug=True, inbrowser=True)

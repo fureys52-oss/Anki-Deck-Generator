@@ -1,99 +1,75 @@
-# prompts.py
+# prompts.py (V5 - Final, Planner-First Architecture)
 
 EXTRACTOR_PROMPT = """
-You are an expert academic assistant. Your task is to extract all key facts, concepts, definitions, and important data from the provided lecture text.
-Present the extracted information as a flat list of concise, standalone statements. Each statement should represent a single "atomic" piece of information.
-Do not use nested lists or complex formatting. Output each fact on a new line. Be comprehensive and extract all available facts.
+You are an expert academic assistant adhering to the Minimum Information Principle. Your task is to extract all key facts, concepts, and definitions from the provided lecture text.
+Present the extracted information as a flat list of concise, standalone statements. Each statement must represent a single "atomic" piece of information.
+Do not group facts. Each line should be a single, self-contained unit of knowledge. Be comprehensive and extract all available facts.
 """
 
 BUILDER_PROMPT = """
-You are an Anki card creation expert. Your task is to convert the provided list of atomic facts into a comprehensive set of high-quality, conceptual flashcards.
-It is critical that you process ALL of the provided atomic facts and convert them into cards.
+You are an expert in cognitive science and curriculum design, creating a small, high-quality set of Anki flashcards from a list of atomic facts.
 
-GUIDELINES:
-1.  **Be Comprehensive:** You must create flashcards covering all the atomic facts provided. Do not leave any facts out.
-2.  **Group Related Facts:** Synthesize 2-4 related atomic facts into a single, cohesive flashcard concept.
-3.  **Formulate as Questions:** The "front" of each card must be a clear, direct question.
-4.  **Provide Comprehensive Answers:** The "back" of the card should fully answer the question, integrating the relevant facts. Use simple HTML for formatting (<b> for bold, <i> for italics, <ul><li> for lists).
-5.  **Generate a Search Query:** For each card, create a concise, 2-3 word `image_search_query` that would be perfect for finding a relevant educational image or diagram (e.g., "mitochondria diagram", "Krebs cycle", "Battle of Hastings").
-6.  **Reference the Source Page:** Accurately cite the `best_pdf_page_for_image` where the core concept for the card is discussed.
+YOUR TWO-STEP PROCESS:
+1.  **PLAN (Internal Monologue):** First, read all the atomic facts provided below. Identify 3-5 high-level, interconnected conceptual themes that represent the core knowledge in this document. Decide which facts belong to each theme. This is your "lesson plan."
 
-OUTPUT FORMAT:
-You MUST output your response as a single, valid JSON array of objects. Do not include any text or formatting outside of this JSON array.
+2.  **EXECUTE (Your Final Output):** Based on your lesson plan, generate one flashcard for each conceptual theme.
 
-JSON STRUCTURE:
-[
-  {{
-    "front": "Question about the concept?",
-    "back": "A comprehensive answer, using simple HTML.",
-    "image_search_query": "A concise 2-3 word search term",
-    "best_pdf_page_for_image": <integer page number>
-  }},
-  ...
-]
+GUIDELINES FOR EACH CARD:
+-   **Synthesize for Understanding:** Each card should explain one high-level concept from your plan, synthesizing the relevant atomic facts.
+-   **Formulate an Insightful Question:** The question should promote higher-order thinking (Why/How, relationships).
+-   **Structure the Answer with Hyphens:** Use hyphenated lists (`- `) to break down the answer into its core components.
+-   **Tag Key Terms Selectively:** In the answer text, wrap only the 3-5 MOST CRITICAL keywords with semantic tags: <pos>term</pos>, <neg>term</neg>, etc.
+-   **Identify the Best Image Page:** The `best_page_for_image` must be the page number containing the most relevant diagram for that specific card's concept.
+-   **Output Format:** You MUST output each card as a block of text with the Question, Answer, Image Search Query, and Page Number, separated by `|||`. Separate each card block with a blank line.
 
-ATOMIC FACTS:
+EXAMPLE OUTPUT:
+How does the Sinoatrial (SA) node function as the heart's natural pacemaker?|||
+- The <pos>SA node</pos> initiates the electrical impulse for a heartbeat.
+- This signal causes the atria to contract and is passed to the <pos>atrioventricular (AV) node</pos>.
+|||sinoatrial node function|||3
+
+What are the four chambers of the heart?|||
+- The heart has two upper chambers called <pos>atria</pos> and two lower chambers called <pos>ventricles</pos>.
+- The <neg>right atrium</neg> receives deoxygenated blood, while the <pos>left atrium</pos> receives oxygenated blood.
+|||heart chambers diagram|||1
+    
+ATOMIC FACTS TO PROCESS:
 {atomic_facts}
-
-LEARNING OBJECTIVES (for context):
-{learning_objectives}
 """
 
 CLOZE_BUILDER_PROMPT = """
-You are an Anki cloze deletion card creation expert. Your task is to convert every single provided atomic fact into a high-quality, "atomic" cloze deletion flashcard. Each card should test only one key piece of information.
+You are an expert in cognitive science creating single-deletion Anki cloze cards. You must adhere to the rules of effective cloze creation to maximize context and minimize ambiguity.
 
 GUIDELINES:
-1.  **One Fact Per Card:** You must convert every atomic fact into its own flashcard. Do not skip any.
-2.  **Identify the Keyword:** For each fact, identify the single most important keyword or key phrase.
-3.  **Create the Cloze Sentence:** The "sentence" should be the full fact, ready for the keyword to be blanked out.
-4.  **Original Question Context:** The "original_question" should be a question that this fact answers, providing context for the cloze.
-5.  **Generate a Search Query:** For each card, create a concise, 2-3 word `image_search_query` for the keyword.
-6.  **Reference the Source Page:** Accurately cite the page number from the `--- Page(s) X ---` marker.
+1.  **One Fact Per Card:** Convert every atomic fact into its own flashcard.
+2.  **Strategic Keyword Selection:** Identify the single MOST critical keyword in the sentence. Do not cloze common verbs or articles.
+3.  **Create the Cloze Sentence:** The sentence MUST contain the cloze deletion in the format `{{c1::keyword}}` or `{{c1::keyword::hint}}`.
+4.  **Maximize Context:** The cloze deletion should be in the latter half of the sentence. Bold up to two other important contextual keywords using `<b>keyword</b>` tags.
+5.  **Output Format:** You MUST output the Context Question, the full Sentence HTML, and a concise Image Search Query, separated by `|||`.
 
-OUTPUT FORMAT:
-You MUST output your response as a single, valid JSON array of objects.
-
-JSON STRUCTURE:
-[
-  {{
-    "sentence": "The full sentence containing the key fact.",
-    "keyword": "The single most important keyword from the sentence.",
-    "original_question": "The context question that this fact answers.",
-    "image_search_query": "A concise 2-3 word search term for the keyword",
-    "page": <integer page number>
-  }},
-  ...
-]
+EXAMPLE OUTPUT:
+What is 'intrinsic load' in Cognitive Load Theory?|||
+In <b>Cognitive Load Theory</b>, the mental effort related to the inherent complexity of the material itself is known as {{c1::intrinsic load}}.
+|||intrinsic cognitive load
 
 ATOMIC FACTS WITH PAGE NUMBERS:
 {atomic_facts_with_pages}
 """
 
 CONCEPTUAL_CLOZE_BUILDER_PROMPT = """
-You are an Anki cloze deletion card creation expert specializing in conceptual understanding. Your task is to convert the provided list of atomic facts into a comprehensive set of "conceptual" cloze deletion flashcards that link multiple related ideas.
+You are an expert in cognitive science, creating multiple-deletion Anki cloze cards. Your primary goal is to deconstruct dense information like lists or processes into sequentially tested parts.
 
 GUIDELINES:
-1.  **Synthesize Facts:** Group 2-3 related atomic facts to form a single, cohesive paragraph or a few related sentences. Process all facts.
-2.  **Identify Keywords:** From the synthesized text, identify 1-3 distinct, important keywords or key phrases.
-3.  **Create the Cloze Sentence:** The "sentence" is the full synthesized text.
-4.  **Original Question Context:** The "original_question" should be a high-level question that the synthesized facts answer.
-5.  **Generate a Search Query:** Create a single, concise `image_search_query` that represents the main theme of the synthesized facts.
-6.  **Reference the Source Page:** Cite the primary page number from the `--- Page(s) X ---` marker where these concepts appear.
+1.  **Identify Deconstructable Facts:** Find groups of facts that represent a list, enumeration, or steps in a process.
+2.  **Synthesize into a Single Sentence:** Combine these facts into one cohesive sentence.
+3.  **Use Sequential Clozes:** For each distinct item, use incremental cloze numbers (e.g., `{{c1::...}}`, `{{c2::...}}`, `{{c3::...}}`). This creates separate cards for each item.
+4.  **Enhance with Formatting:** Bold any other important contextual keywords that are NOT clozed, using `<b>keyword</b>` syntax.
+5.  **Output Format:** You MUST output the Context Question, the full Sentence HTML, and a concise Image Search Query, separated by `|||`.
 
-OUTPUT FORMAT:
-You MUST output your response as a single, valid JSON array of objects.
-
-JSON STRUCTURE:
-[
-  {{
-    "sentence": "The full synthesized paragraph containing multiple related facts.",
-    "keywords": ["keyword1", "keyword2"],
-    "original_question": "The high-level context question that these facts answer.",
-    "image_search_query": "A concise 2-3 word search term for the main theme",
-    "page": <integer page number>
-  }},
-  ...
-]
+EXAMPLE OUTPUT:
+What are the three stages of prenatal development?|||
+The three stages of <b>prenatal development</b> are the {{c1::Zygotic}} stage, the {{c2::Embryonic}} stage, and the {{c3::Fetal}} stage.
+|||prenatal development stages
 
 ATOMIC FACTS WITH PAGE NUMBERS:
 {atomic_facts_with_pages}

@@ -1,6 +1,8 @@
-# processing.py
+# processing.py (V5.1 - Final Corrected Version)
 
 import json, base64, hashlib, io, re, time, traceback
+import regex
+import markdown2
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple, Any
@@ -9,9 +11,8 @@ from collections import deque
 import fitz, requests, gradio as gr
 from PIL import Image
 
-# Local application imports
 from prompts import EXTRACTOR_PROMPT, BUILDER_PROMPT, CLOZE_BUILDER_PROMPT, CONCEPTUAL_CLOZE_BUILDER_PROMPT
-from utils import get_api_keys_from_env, manage_log_files, search_wikimedia_for_image, is_image_high_quality_heuristic
+from utils import get_api_keys_from_env, manage_log_files, search_wikimedia_for_image, is_image_high_quality_heuristic, perform_ocr_on_image
 
 # --- Configuration Constants ---
 ANKI_CONNECT_URL = "http://127.0.0.1:8765"
@@ -19,12 +20,16 @@ MAX_WORKERS_EXTRACTION = 8
 RPM_LIMIT_FLASH = 15
 BATCH_SIZE = 3
 INTER_DECK_COOLDOWN_SECONDS = 30
+HTML_COLOR_MAP = {
+    "positive_key_term": "#87CEFA", "negative_key_term": "#FF6347",
+    "example": "#90EE90", "mnemonic_tip": "#FFD700"
+}
 
 NOTE_TYPE_CONFIG = {
     "basic": {
         "modelName": "Anki Deck Generator - Basic",
         "fields": ["Front", "Back", "Image", "Source"],
-        "css": """.card { font-family: Arial; font-size: 20px; text-align: center; } img { max-height: 500px; }""",
+        "css": """.card { font-family: Arial; font-size: 20px; text-align: center; } img { max-height: 500px; } ul { display: inline-block; text-align: left; }""",
         "templates": [{"Name": "Card 1", "Front": "{{Front}}", "Back": "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}\n\n<br><br>{{#Image}}{{Image}}{{/Image}}\n<div style='font-size:12px; color:grey;'>{{Source}}</div>"}]
     },
     "cloze": {
@@ -36,40 +41,65 @@ NOTE_TYPE_CONFIG = {
     }
 }
 
-# --- Backend Helper Functions ---
-def get_pdf_content(pdf_path: str, pdf_cache_dir: Path) -> Tuple[str, Dict[int, List[bytes]]]:
+# --- HTML Engine ---
+def build_html_from_tags(text: str, enabled_colors: List[str]) -> str:
+    """Converts custom tags and hyphens into final HTML."""
+    tag_map = {
+        "<pos>": ("positive_key_term", f"<font color='{HTML_COLOR_MAP['positive_key_term']}'><b>"), "</pos>": ("positive_key_term", "</b></font>"),
+        "<neg>": ("negative_key_term", f"<font color='{HTML_COLOR_MAP['negative_key_term']}'><b>"), "</neg>": ("negative_key_term", "</b></font>"),
+        "<ex>": ("example", f"<font color='{HTML_COLOR_MAP['example']}'>"), "</ex>": ("example", "</font>"),
+        "<tip>": ("mnemonic_tip", f"<font color='{HTML_COLOR_MAP['mnemonic_tip']}'>"), "</tip>": ("mnemonic_tip", "</font>"),
+    }
+    for tag, (key, replacement) in tag_map.items():
+        text = text.replace(tag, replacement if key in enabled_colors else "")
+    
+    # Convert Markdown lists to HTML line breaks for centered formatting
+    html = markdown2.markdown(text, extras=["cuddled-lists"])
+    # Remove list tags and convert list items to hyphenated lines
+    html = html.replace("<ul>\n<li>", "- ").replace("</li>\n<li>", "<br>- ").replace("</li>\n</ul>", "")
+    # Ensure any remaining newlines become line breaks
+    return html.replace('\n', '<br>')
+
+def get_pdf_content(pdf_path: str, pdf_cache_dir: Path) -> Tuple[str, Dict[int, List[bytes]], List[str]]:
     pdf_cache_dir.mkdir(exist_ok=True)
+    ocr_log = []
+    def is_text_meaningful(text: str, min_chars: int = 20) -> bool:
+        alphanumeric_chars = re.sub(r'[^a-zA-Z0-9]', '', text)
+        return len(alphanumeric_chars) >= min_chars
     try:
         pdf_hash = hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()
-    except IOError as e: return f"Error reading PDF file {Path(pdf_path).name}: {e}", {}
+    except IOError as e: 
+        return f"Error reading PDF file {Path(pdf_path).name}: {e}", {}, []
     cache_file = pdf_cache_dir / f"{pdf_hash}.json"
     if cache_file.exists():
         try:
             cached_data = json.loads(cache_file.read_text(encoding='utf-8'))
             images_by_page = {int(k): [base64.b64decode(img) for img in v] for k, v in cached_data["images"].items()}
-            return cached_data["text"], images_by_page
+            return cached_data["text"], images_by_page, []
         except (json.JSONDecodeError, KeyError, TypeError): pass
-    
     text_content, images_by_page = "", {}
     try:
         with fitz.open(pdf_path) as doc:
             for page_num, page in enumerate(doc, 1):
-                text_content += f"--- Page {page_num} ---\n{page.get_text()}\n\n"
+                page_text = page.get_text()
+                if not is_text_meaningful(page_text):
+                    ocr_log.append(f"Page {page_num}: No selectable text found, falling back to OCR.")
+                    pix = page.get_pixmap(dpi=300)
+                    img_bytes = pix.tobytes("png")
+                    page_text = perform_ocr_on_image(img_bytes)
+                text_content += f"--- Page {page_num} ---\n{page_text}\n\n"
                 page_images_data = []
                 for img in page.get_images(full=True):
                     if extracted_img := doc.extract_image(img[0]):
-                        if extracted_img.get("image"):
-                            page_images_data.append(extracted_img["image"])
-                if page_images_data:
-                    images_by_page[page_num] = page_images_data
+                        if extracted_img.get("image"): page_images_data.append(extracted_img["image"])
+                if page_images_data: images_by_page[page_num] = page_images_data
     except fitz.errors.FitzError as e:
         if "encrypted" in str(e).lower():
-            return f"Error: The PDF file {Path(pdf_path).name} is password-protected and cannot be processed.", {}
-        return f"Error processing PDF {Path(pdf_path).name}: {e}", {}
-    
+            return f"Error: The PDF file {Path(pdf_path).name} is password-protected and cannot be processed.", {}, []
+        return f"Error processing PDF {Path(pdf_path).name}: {e}", {}, []
     images_b64 = {k: [base64.b64encode(img).decode() for img in v] for k, v in images_by_page.items()}
     cache_file.write_text(json.dumps({"text": text_content, "images": images_b64}), encoding='utf-8')
-    return text_content, images_by_page
+    return text_content, images_by_page, ocr_log
 
 def clean_pdf_text(raw_text: str) -> str:
     lines = raw_text.split('\n')
@@ -165,7 +195,7 @@ def add_note_to_anki(deck_name: str, note_type_key: str, fields_data: Dict[str, 
     return invoke_ankiconnect("addNote", note=note)
 
 class DeckProcessor:
-    def __init__(self, deck_name, files, api_keys, logger, progress, card_type, image_strategy, custom_tags, prompts_dict, cache_dirs, batch_size, max_workers, rpm_limit):
+    def __init__(self, deck_name, files, api_keys, logger, progress, card_type, image_strategy, enabled_colors, custom_tags, prompts_dict, cache_dirs, batch_size, max_workers, rpm_limit):
         self.deck_name = deck_name
         self.files = files
         self.api_keys = api_keys
@@ -173,6 +203,7 @@ class DeckProcessor:
         self.progress = progress
         self.card_type = card_type
         self.image_strategy = image_strategy
+        self.enabled_colors = enabled_colors
         self.custom_tags = custom_tags
         self.prompts_dict = prompts_dict
         self.pdf_cache_dir, self.ai_cache_dir = cache_dirs
@@ -194,9 +225,9 @@ class DeckProcessor:
             if not self._process_pdfs(): return
             atomic_facts_str, atomic_facts_with_pages = self._extract_facts()
             if atomic_facts_str is None: return
-            final_cards_json_str = self._generate_cards(atomic_facts_str, atomic_facts_with_pages)
-            if final_cards_json_str is None: return
-            final_cards = self._parse_and_deduplicate(final_cards_json_str)
+            final_cards_text = self._generate_cards(atomic_facts_str, atomic_facts_with_pages)
+            if final_cards_text is None: return
+            final_cards = self._parse_and_deduplicate(final_cards_text)
             if final_cards is None: return
             self._add_notes_to_anki(final_cards)
         except Exception as e:
@@ -214,17 +245,23 @@ class DeckProcessor:
 
     def _process_pdfs(self):
         self.log("\n--- Processing PDF Files ---")
+        total_ocr_pages = 0
         for pdf_path in self.progress.tqdm(self.pdf_paths, desc="Processing PDFs"):
             pdf_bytes = Path(pdf_path).read_bytes()
             self.combined_pdf_hash.update(pdf_bytes)
-            text, images_on_page = get_pdf_content(pdf_path, self.pdf_cache_dir)
+            text, images_on_page, ocr_log = get_pdf_content(pdf_path, self.pdf_cache_dir)
             if "Error:" in text and not images_on_page:
                 self.log(text); return False
+            if ocr_log:
+                self.log(f"   > OCR performed on '{Path(pdf_path).name}':")
+                for log_entry in ocr_log: self.log(f"     - {log_entry}")
+                total_ocr_pages += len(ocr_log)
             self.full_text += f"\n\n--- Content from {Path(pdf_path).name} ---\n{text}"
             for page_num, images in images_on_page.items():
-                if page_num not in self.all_images_by_page:
-                    self.all_images_by_page[page_num] = []
+                if page_num not in self.all_images_by_page: self.all_images_by_page[page_num] = []
                 self.all_images_by_page[page_num].extend(images)
+        if total_ocr_pages > 0:
+            self.log(f"   > OCR Summary: A total of {total_ocr_pages} page(s) were processed using OCR.")
         self.log("All PDF files processed and cached.")
         return True
 
@@ -241,8 +278,7 @@ class DeckProcessor:
             batch = all_pages[j:j+self.batch_size]
             page_numbers = [str(p[0]) for p in batch]
             combined_text = "\n\n".join([p[1] for p in batch])
-            task_id = f"{page_numbers[0]}-{page_numbers[-1]}"
-            batched_tasks.append((task_id, combined_text))
+            batched_tasks.append((f"{page_numbers[0]}-{page_numbers[-1]}", combined_text))
         atomic_facts_by_page_range = {}
         request_timestamps = deque()
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -252,104 +288,102 @@ class DeckProcessor:
                     current_time = time.time()
                     while request_timestamps and request_timestamps[0] < current_time - 60: request_timestamps.popleft()
                     if len(request_timestamps) < self.rpm_limit:
-                        request_timestamps.append(current_time)
-                        break
-                    else:
-                        time.sleep(60 - (current_time - request_timestamps[0]) + 0.1)
+                        request_timestamps.append(current_time); break
+                    else: time.sleep(60 - (current_time - request_timestamps[0]) + 0.1)
                 response = call_gemini(self.prompts_dict['extractor'] + f"\n\n--- TEXT ---\n{batch_content}", self.api_keys["GEMINI_API_KEY"], model_name=extractor_model)
                 return page_range, response
             results = list(self.progress.tqdm(executor.map(extract_facts_from_batch, batched_tasks), total=len(batched_tasks), desc="Extracting Facts in Batches"))
         atomic_facts_with_pages = ""
         for page_range, page_facts in results:
             if page_facts == "API_LIMIT_REACHED":
-                self.log(("\n--- PROCESS STOPPED: API LIMIT REACHED ---\n..."))
-                raise Exception("API Limit Reached")
+                self.log(("\n--- PROCESS STOPPED: API LIMIT REACHED ---\n...")); raise Exception("API Limit Reached")
             elif "API_" in page_facts:
-                self.log(f"\nWARNING (Page Range {page_range}): {page_facts}. This batch will be skipped.")
-                continue
+                self.log(f"\nWARNING (Page Range {page_range}): {page_facts}. This batch will be skipped."); continue
             if page_facts and "Error" not in page_facts:
                 atomic_facts_by_page_range[page_range] = page_facts
                 atomic_facts_with_pages += f"--- Page(s) {page_range} ---\n{page_facts}\n"
         atomic_facts_str = "".join(atomic_facts_by_page_range.values())
         if not atomic_facts_str.strip():
-            self.log("ERROR: AI Pass 1 failed to extract any facts from any page.")
-            return None, None
+            self.log("ERROR: AI Pass 1 failed to extract any facts from any page."); return None, None
         self.log(f"Pass 1 complete. Found {len(atomic_facts_str.splitlines())} facts.")
         return atomic_facts_str, atomic_facts_with_pages
 
     def _generate_cards(self, atomic_facts_str, atomic_facts_with_pages):
-        safe_card_type_str = re.sub(r'[\\/*?:"<>|()]', "", self.card_type)
-        card_type_slug = safe_card_type_str.replace(" ", "_").lower()
-        ai_cache_key = f"{self.combined_pdf_hash.hexdigest()}_{card_type_slug}.json"
+        card_type_slug = self.card_type.replace(" ", "_").lower()
+        ai_cache_key = f"{self.combined_pdf_hash.hexdigest()}_{card_type_slug}_v5.txt"
         ai_cache_file = self.ai_cache_dir / ai_cache_key
         if ai_cache_file.exists():
             self.log("\n--- Found Cached AI Response! Skipping card generation. ---")
             return ai_cache_file.read_text(encoding='utf-8')
         self.log("\n--- No cached response found. Generating new cards with AI... ---")
-        learning_objectives_text = "".join(p for p in self.full_text.split("--- Page ")[1:] if "learning objectives" in p.lower())
-        if "Basic" in self.card_type: pass2_prompt = self.prompts_dict['builder'].format(atomic_facts=atomic_facts_str, learning_objectives=learning_objectives_text)
-        elif "Atomic Cloze" in self.card_type: pass2_prompt = self.prompts_dict['cloze_builder'].format(atomic_facts_with_pages=atomic_facts_with_pages)
-        else: pass2_prompt = self.prompts_dict['conceptual_cloze_builder'].format(atomic_facts_with_pages=atomic_facts_with_pages)
-        final_cards_json_str = call_gemini(pass2_prompt, self.api_keys["GEMINI_API_KEY"])
-        if "API_" in final_cards_json_str:
-            self.log(f"\nERROR: AI card generation failed. Reason: {final_cards_json_str}")
-            return None
-        if "Error" not in final_cards_json_str and final_cards_json_str.strip():
+        if "Basic" in self.card_type:
+            pass2_prompt = self.prompts_dict['builder'].format(atomic_facts=atomic_facts_str)
+        elif "Atomic Cloze" in self.card_type:
+            pass2_prompt = self.prompts_dict['cloze_builder'].format(atomic_facts_with_pages=atomic_facts_with_pages)
+        else:
+            pass2_prompt = self.prompts_dict['conceptual_cloze_builder'].format(atomic_facts_with_pages=atomic_facts_with_pages)
+        final_cards_text = call_gemini(pass2_prompt, self.api_keys["GEMINI_API_KEY"])
+        if "API_" in final_cards_text:
+            self.log(f"\nERROR: AI card generation failed. Reason: {final_cards_text}"); return None
+        if final_cards_text.strip():
             self.ai_cache_dir.mkdir(exist_ok=True)
-            ai_cache_file.write_text(final_cards_json_str, encoding='utf-8')
+            ai_cache_file.write_text(final_cards_text, encoding='utf-8')
             self.log("Saved new AI response to cache.")
-        return final_cards_json_str
+        return final_cards_text
 
-    def _parse_and_deduplicate(self, final_cards_json_str):
-        if not final_cards_json_str or "Error" in final_cards_json_str:
-            self.log(f"ERROR: AI card generation failed. Response: {final_cards_json_str}")
-            return None
-        self.log("\n--- Parsing AI JSON Response ---")
-        try:
-            json_cleaned_str = final_cards_json_str.strip().replace("```json", "").replace("```", "")
-            final_cards = json.loads(json_cleaned_str)
-            self.log(f"Successfully parsed {len(final_cards)} cards from JSON response.")
-        except json.JSONDecodeError as e:
-            self.log(f"CRITICAL ERROR: Failed to parse JSON from AI. Error: {e}\n\nAI Response was:\n{final_cards_json_str}")
-            return None
-        self.log("Checking for duplicate cards generated by the AI...")
-        unique_cards = []
-        seen_fronts = set()
-        duplicates_found = 0
-        for card in final_cards:
-            front_content = card.get("front") if self.note_type_key == "basic" else card.get("original_question")
-            if front_content and front_content not in seen_fronts:
-                seen_fronts.add(front_content)
-                unique_cards.append(card)
-            else:
-                duplicates_found += 1
-        if duplicates_found > 0:
-            self.log(f"   > INFO: Found and removed {duplicates_found} duplicate card(s) from the AI's output.")
+    def _parse_and_deduplicate(self, raw_text_response):
+        if not raw_text_response or "Error" in raw_text_response:
+            self.log(f"ERROR: AI card generation failed."); return None
+        self.log("\n--- Parsing AI Response ---")
+        final_cards = []
+        card_blocks = raw_text_response.strip().split('\n\n')
+        for block in card_blocks:
+            card = None
+            if "|||" in block:
+                parts = block.split('|||')
+                if self.card_type == "Conceptual (Basic Cards)" and len(parts) == 4:
+                    front, back, query, page_str = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    if front and back and query:
+                        try: page = int(page_str)
+                        except (ValueError, TypeError): page = 1
+                        card = {"front": front, "back_text": back, "image_search_query": query, "best_page_for_image": page}
+                elif "Cloze" in self.card_type and len(parts) == 3:
+                    oq, sentence, query = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                    if oq and sentence and query:
+                        card = {"original_question": oq, "sentence_html": sentence, "image_search_query": query, "page": 1}
+            if card: final_cards.append(card)
+        if not final_cards:
+            self.log(f"CRITICAL ERROR: No valid cards could be parsed from the AI's response."); return None
+        self.log(f"Successfully parsed {len(final_cards)} cards.")
+        unique_cards = list({(card.get('front') or card.get('original_question')): card for card in final_cards}.values())
+        if len(unique_cards) < len(final_cards):
+            self.log(f"   > INFO: Found and removed {len(final_cards) - len(unique_cards)} duplicate card(s).")
         return unique_cards
 
-    def _find_best_image_for_card(self, card_data: Dict[str, Any]) -> str | None:
+    def _find_best_image_for_card(self, card_data: Dict[str, Any], page_ref_int: int) -> str | None:
         if self.image_strategy == "None (Text-Only)":
             return None
+
+        # Attempt to find a suitable image in the PDF first for relevant strategies
+        if self.image_strategy in ["PDF Only (Fastest, Free)", "PDF Priority (Smart)"]:
+            page_images = self.all_images_by_page.get(page_ref_int, [])
+            if page_images:
+                high_quality_images = [img for img in page_images if is_image_high_quality_heuristic(img)]
+                if high_quality_images:
+                    self.log(f"   > Found high-quality image in PDF on page {page_ref_int}.")
+                    best_image = max(high_quality_images, key=len)
+                    b64_image = base64.b64encode(best_image).decode('utf-8')
+                    return f'<img src="data:image/jpeg;base64,{b64_image}">'
         
-        page_ref = card_data.get('page', card_data.get('best_pdf_page_for_image'))
-        if self.image_strategy in ["PDF Only (Fastest, Free)", "PDF Priority (Balanced)"]:
-            if page_ref:
-                page_images = self.all_images_by_page.get(int(page_ref), [])
-                if page_images:
-                    high_quality_images = [img for img in page_images if is_image_high_quality_heuristic(img)]
-                    if high_quality_images:
-                        self.log(f"   > Found and added image from PDF.")
-                        best_image = max(high_quality_images, key=len)
-                        b64_image = base64.b64encode(best_image).decode('utf-8')
-                        return f'<img src="data:image/jpeg;base64,{b64_image}">'
-        
-        image_html = None
-        if self.image_strategy == "Wikimedia (Educational, Free)":
+        # If no suitable PDF image was found, fall back to web search if applicable
+        if self.image_strategy in ["Wikimedia (Educational, Free)", "PDF Priority (Smart)"]:
+            if self.image_strategy == "PDF Priority (Smart)":
+                self.log(f"   > No suitable PDF image found. Falling back to web search.")
             search_query = card_data.get("image_search_query") or card_data.get("front")
             self.log(f"   > Searching Wikimedia for '{search_query}'...")
             image_html = search_wikimedia_for_image(search_query)
             if image_html:
-                self.log(f"   > Found and added image.")
+                self.log(f"   > Found and added image from web.")
                 return image_html
         
         return None
@@ -359,52 +393,41 @@ class DeckProcessor:
         cards_added, cards_skipped, cards_failed = 0, 0, 0
         for card_data in self.progress.tqdm(final_cards, desc="Adding Cards to Anki"):
             try:
-                fields = {}
-                final_note_type_key = self.note_type_key
-                page_ref = card_data.get('page', card_data.get('best_pdf_page_for_image', 1))
-                source_text = f"{Path(self.pdf_paths[0]).stem} - Pg {page_ref}"
-                
-                image_html = self._find_best_image_for_card(card_data)
-
+                fields, final_note_type_key = {}, self.note_type_key
+                page_ref_raw = card_data.get('best_page_for_image') or card_data.get('page', 1)
+                page_ref_str = str(page_ref_raw).strip()
+                page_ref_int = int(page_ref_str.split('-')[0])
+                source_text = f"{Path(self.pdf_paths[0]).stem} - Pg {page_ref_str}"
+                image_html = self._find_best_image_for_card(card_data, page_ref_int)
                 if self.note_type_key == "basic":
-                    front, back = card_data.get("front"), card_data.get("back")
-                    if not (front and back): cards_skipped += 1; continue
-                    fields = {"Front": front, "Back": back, "Source": source_text, "Image": image_html or ""}
-                else:
-                    sentence, original_question = card_data.get("sentence"), card_data.get("original_question", "")
-                    if not (sentence and original_question): cards_skipped += 1; continue
-                    final_cloze_text = sentence
-                    if keywords := card_data.get("keywords"):
-                        for k, kw in enumerate(keywords): final_cloze_text = final_cloze_text.replace(kw, f"{{{{c{k+1}::{kw}}}}}")
-                    elif keyword := card_data.get("keyword"): final_cloze_text = sentence.replace(keyword, f"{{{{c1::{keyword}}}}}")
-                    
-                    if "{{" not in final_cloze_text:
-                        self.log(f"   > WARNING (Page {page_ref}): AI keyword mismatch. Converting to Basic card.")
-                        fields = {"Front": original_question, "Back": sentence, "Source": source_text, "Image": image_html or ""}
+                    front, back_text = card_data.get("front"), card_data.get("back_text")
+                    if front and back_text:
+                        back_html = build_html_from_tags(back_text, self.enabled_colors)
+                        fields = {"Front": front, "Back": back_html, "Source": source_text, "Image": image_html or ""}
+                    else: cards_skipped += 1; continue
+                else: # Cloze Cards
+                    sentence_html = card_data.get("sentence_html")
+                    original_question = card_data.get("original_question")
+                    if not (sentence_html and original_question): cards_skipped += 1; continue
+                    if "{{" not in sentence_html:
+                        self.log(f"   > WARNING (Page {page_ref_str}): AI failed to generate a cloze. Converting to Basic card.")
+                        fields = {"Front": original_question, "Back": sentence_html, "Source": source_text, "Image": image_html or ""}
                         final_note_type_key = "basic"
                     else:
-                        fields = {"Text": final_cloze_text, "Extra": original_question, "Source": source_text, "Image": image_html or ""}
-
+                        fields = {"Text": sentence_html, "Extra": original_question, "Source": source_text, "Image": image_html or ""}
                 if not fields: cards_skipped += 1; continue
-                
-                note_id, error = add_note_to_anki(self.deck_name, final_note_type_key, fields, self.pdf_paths[0], self.custom_tags)
+                _, error = add_note_to_anki(self.deck_name, final_note_type_key, fields, self.pdf_paths[0], self.custom_tags)
                 if error:
-                    if "duplicate" in error:
-                        cards_skipped += 1
-                    else:
-                        self.log(f"   > FAILED to add note. Reason: {error}")
-                        cards_failed += 1
+                    if "duplicate" in error: cards_skipped += 1
+                    else: self.log(f"   > FAILED to add note. Reason: {error}"); cards_failed += 1
                     continue
                 cards_added += 1
             except Exception as e:
-                cards_failed += 1
-                self.log(f"ERROR processing card data: '{card_data}' | Exception: {e}")
+                cards_failed += 1; self.log(f"ERROR processing card data: '{card_data}' | Exception: {e}")
         self.log(f"\n--- Final Tally ---\nCards Added: {cards_added}\nCards Skipped/Failed: {cards_skipped + cards_failed}")
-
 def generate_all_decks(max_decks: int, master_files, generate_button, log_output, *args):
     log_history = ""
     session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
     def logger(message):
         nonlocal log_history
         timestamp_msg = datetime.now().strftime('%H:%M:%S')
@@ -413,30 +436,27 @@ def generate_all_decks(max_decks: int, master_files, generate_button, log_output
         log_history += full_message + "\n"
         print(full_message)
         return log_history
-
     final_ui_state = [gr.update(), gr.update(interactive=True), gr.update(value="Generate All Decks")]
     log_file_path = None
-
     try:
         yield logger(f"Starting Anki Deck Generator..."), gr.update(interactive=False), gr.update(value="Processing...")
-        
         from app import LOG_DIR, MAX_LOG_FILES, PDF_CACHE_DIR, AI_CACHE_DIR
-        
         manage_log_files(LOG_DIR, MAX_LOG_FILES)
         log_file_path = LOG_DIR / f"session_log_{session_timestamp}.txt"
         cache_dirs = (PDF_CACHE_DIR, AI_CACHE_DIR)
-        
         deck_inputs_per_deck = 2
-        num_core_settings = 7
+        num_core_settings = 8
         expected_arg_len = (max_decks * deck_inputs_per_deck) + num_core_settings
         if len(args) != expected_arg_len:
             yield logger(f"CRITICAL ERROR: Argument mismatch. Expected {expected_arg_len} but received {len(args)}."), *final_ui_state[1:]
             return
-
         deck_inputs = args[:max_decks * deck_inputs_per_deck]
         other_args = args[max_decks * deck_inputs_per_deck:]
-        card_type, image_strategy, custom_tags_str, extractor_prompt, builder_prompt, cloze_builder_prompt, conceptual_cloze_builder_prompt = other_args
+        card_type, image_strategy, enabled_colors, custom_tags_str, extractor_prompt, builder_prompt, cloze_builder_prompt, conceptual_cloze_builder_prompt = other_args
+        
+        # CORRECTED: The prompts_dict is now simple and correct.
         prompts_dict = {'extractor': extractor_prompt, 'builder': builder_prompt, 'cloze_builder': cloze_builder_prompt, 'conceptual_cloze_builder': conceptual_cloze_builder_prompt}
+        
         custom_tags = [tag.strip() for tag in custom_tags_str.split(',') if tag.strip()]
         api_keys = get_api_keys_from_env()
         deck_configs = []
@@ -458,9 +478,10 @@ def generate_all_decks(max_decks: int, master_files, generate_button, log_output
             processor = DeckProcessor(
                 deck_name=deck_name, files=files, api_keys=api_keys, 
                 logger=processor_logger_wrapper, progress=progress, card_type=card_type, 
-                image_strategy=image_strategy, custom_tags=custom_tags, 
-                prompts_dict=prompts_dict, cache_dirs=cache_dirs,
-                batch_size=BATCH_SIZE, max_workers=MAX_WORKERS_EXTRACTION, rpm_limit=RPM_LIMIT_FLASH
+                image_strategy=image_strategy, enabled_colors=enabled_colors, 
+                custom_tags=custom_tags, prompts_dict=prompts_dict, 
+                cache_dirs=cache_dirs, batch_size=BATCH_SIZE, 
+                max_workers=MAX_WORKERS_EXTRACTION, rpm_limit=RPM_LIMIT_FLASH
             )
             processor.run()
             yield log_history, gr.update(), gr.update()

@@ -14,14 +14,11 @@ MAX_LOG_FILES = 10
 # --- Setup Imports ---
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from app import (
-        get_api_keys_from_env, get_pdf_content, invoke_ankiconnect, 
-        guess_lecture_details, call_gemini, call_gemini_vision
-    )
-    from prompts import (
-        BUILDER_PROMPT, CLOZE_BUILDER_PROMPT, CONCEPTUAL_CLOZE_BUILDER_PROMPT, 
-        AUDITOR_PROMPT, VERIFIER_PROMPT
-    )
+    from processing import call_gemini
+    except Exception as e:
+        print(f"A test failed with an error: {e}")
+from prompts import BUILDER_PROMPT
+from utils import guess_lecture_details
 except ImportError as e:
     print(f"[FATAL] Could not import from app.py or prompts.py. Error: {e}")
     sys.exit(1)

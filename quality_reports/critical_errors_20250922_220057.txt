@@ -1,0 +1,3 @@
+.\processing.py:202:29: E999 IndentationError: unindent does not match any outer indentation level
+.\test_suite.py:18:2: E999 SyntaxError: expected 'except' or 'finally' block
+.\ui.py:17:1: F401 'utils.guess_lecture_details' imported but unused

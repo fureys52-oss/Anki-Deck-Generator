@@ -226,3 +226,29 @@ env.*
 .pdf_cache/
 logs/
 test_logs/
+.vs
+
+# Python runtime files
+__pycache__/
+*.pyc
+
+# Python virtual environment
+venv/
+.venv/
+
+# Secret credentials - CRITICAL
+# This will ignore .env, env.freetier, env.paid, etc.
+.env
+env.*
+*.json
+
+# Temporary cache and log files
+.ai_cache/
+.pdf_cache/
+logs/
+test_logs/
+
+# IDE / Editor-specific configuration
+.vscode/
+.idea/
+.vs/

@@ -1,75 +1,151 @@
-# prompts.py (V5 - Final, Planner-First Architecture)
+# prompts.py
 
 EXTRACTOR_PROMPT = """
-You are an expert academic assistant adhering to the Minimum Information Principle. Your task is to extract all key facts, concepts, and definitions from the provided lecture text.
-Present the extracted information as a flat list of concise, standalone statements. Each statement must represent a single "atomic" piece of information.
-Do not group facts. Each line should be a single, self-contained unit of knowledge. Be comprehensive and extract all available facts.
+You are an expert data extraction engine. Your sole function is to process the provided text, which contains content from multiple pages, and return a valid JSON array of objects.
+
+CRITICAL OUTPUT RULES:
+1.  **JSON Array Output:** You MUST return a single, valid JSON array `[]`. Do not output any text, notes, or explanations outside of this array.
+2.  **Object Structure:** Each object in the array must have two keys:
+    - `"fact"`: A string containing the single, atomic piece of information extracted.
+    - `"page_number"`: The integer page number from which the fact was extracted.
+3.  **Comprehensive Extraction:** You must be exhaustive and extract all available facts from all pages provided in the text. Ignore headers, footers, and page markers in the final fact text.
+
+EXAMPLE:
+--- INPUT TEXT ---
+--- Page 9 ---
+The heart has four chambers. Coccidioides is endemic to the Southwestern US.
+--- Page 10 ---
+The Krebs cycle produces ATP.
+
+--- CORRECT JSON OUTPUT ---
+[
+  {
+    "fact": "The heart has four chambers.",
+    "page_number": 9
+  },
+  {
+    "fact": "Coccidioides is endemic to the Southwestern US.",
+    "page_number": 9
+  },
+  {
+    "fact": "The Krebs cycle produces ATP.",
+    "page_number": 10
+  }
+]
 """
 
 BUILDER_PROMPT = """
-You are an expert in cognitive science and curriculum design, creating a small, high-quality set of Anki flashcards from a list of atomic facts.
+Role: You are an expert medical educator and curriculum designer specializing in spaced repetition learning.
 
-YOUR TWO-STEP PROCESS:
-1.  **PLAN (Internal Monologue):** First, read all the atomic facts provided below. Identify 3-5 high-level, interconnected conceptual themes that represent the core knowledge in this document. Decide which facts belong to each theme. This is your "lesson plan."
+Goal: Your primary objective is to convert a list of single-sentence atomic facts into a structured JSON array of high-quality, integrative Anki cards by calling the `create_anki_card` function for each conceptual chunk. Synthesize related facts into pedagogical "chunks" that promote deep understanding over rote memorization.
 
-2.  **EXECUTE (Your Final Output):** Based on your lesson plan, generate one flashcard for each conceptual theme.
+Core Rules & Parameters:
 
-GUIDELINES FOR EACH CARD:
--   **Synthesize for Understanding:** Each card should explain one high-level concept from your plan, synthesizing the relevant atomic facts.
--   **Formulate an Insightful Question:** The question should promote higher-order thinking (Why/How, relationships).
--   **Structure the Answer with Hyphens:** Use hyphenated lists (`- `) to break down the answer into its core components.
--   **Tag Key Terms Selectively:** In the answer text, wrap only the 3-5 MOST CRITICAL keywords with semantic tags: <pos>term</pos>, <neg>term</neg>, etc.
--   **Identify the Best Image Page:** The `best_page_for_image` must be the page number containing the most relevant diagram for that specific card's concept.
--   **Output Format:** You MUST output each card as a block of text with the Question, Answer, Image Search Query, and Page Number, separated by `|||`. Separate each card block with a blank line.
+Comprehensive Coverage and Grouping: Your primary goal is to ensure that every atomic fact from the input is used to inform the creation of at least one card. You must logically group facts based on shared themes, mechanisms, or clinical concepts. It is permissible to use a single crucial fact in more than one card if it is central to understanding multiple distinct concepts.
 
-EXAMPLE OUTPUT:
-How does the Sinoatrial (SA) node function as the heart's natural pacemaker?|||
-- The <pos>SA node</pos> initiates the electrical impulse for a heartbeat.
-- This signal causes the atria to contract and is passed to the <pos>atrioventricular (AV) node</pos>.
-|||sinoatrial node function|||3
+Context-Aware Chunking by Content Size:
+Your absolute limits for the "Back" of a card are 200-1000 characters. Within this range, you must dynamically select a target size based on the conceptual complexity of the grouped facts. Strive to create cards in the Integrative Concepts range whenever possible, as this is the primary learning goal. Use the other ranges only when the content is exceptionally simple or complex.
 
-What are the four chambers of the heart?|||
-- The heart has two upper chambers called <pos>atria</pos> and two lower chambers called <pos>ventricles</pos>.
-- The <neg>right atrium</neg> receives deoxygenated blood, while the <pos>left atrium</pos> receives oxygenated blood.
-|||heart chambers diagram|||1
-    
-ATOMIC FACTS TO PROCESS:
-{atomic_facts}
+For Simple Concepts (e.g., listing the branches of the celiac trunk, defining a single term like "akathisia", listing a classic symptom triad): Aim for a concise card of 200-300 characters.
+
+For Integrative Concepts (e.g., explaining a mechanism, pathophysiology, compare/contrast): Aim for a standard card of 400-800 characters.
+
+For Complex, Interconnected Systems (e.g., entire physiological pathways, feedback loops that lose meaning if separated): Aim for a comprehensive card of 800-1000 characters.
+
+Question Generation (Front):
+
+The "Front" must be a specific, 2nd or 3rd-order question that exhaustively prompts for the information on the "Back".
+
+Use varied question styles: "Explain the mechanism...", "Compare and contrast...", "A patient presents with...", or "Why is...".
+
+Handling Simple/Definitional Facts: If a simple definitional fact is best learned in the context of a larger topic, prefix it to the front of a related, more complex question.
+
+Example: "Define heart failure. Then, explain the primary clinical consequences of chronic hypertension leading to this condition."
+
+Answer Generation (Back):
+
+The "Back" must be formatted using hyphenated bullet points (-). Use empty line breaks to separate distinct conceptual sections.
+
+You must use the following custom tags to enclose specific information:
+
+<pos>: For key terms, definitions, or core positive concepts.
+
+<neg>: For consequences, side effects, contraindications, or negative outcomes.
+
+<ex>: For specific examples.
+
+<tip>: For tips, mnemonics, or high-yield clinical pearls.
+
+Metadata - Page Numbers: The "Page numbers" field must be a JSON array of unique integers from the source facts (e.g., [45, 46, 48]).
+
+Metadata - Image Query Generation Rules:
+You must provide two fields for image searching: "Search_Query" and "Simple_Search_Query".
+
+1.  **"Search_Query" (Primary):**
+    -   A concise (2-5 word) string.
+    -   MUST extract the 1-3 most critical medical/scientific keywords from the 'Back' content.
+    -   MUST end with a specific image type: "diagram", "illustration", "chart", "micrograph", or "map".
+    -   **Good Example:** "GMS stain Histoplasma micrograph"
+
+2.  **"Simple_Search_Query" (Fallback):**
+    -   A broader (1-3 word) query.
+    -   Should contain only the most essential noun(s) from the primary query.
+    -   MUST NOT contain an image type.
+    -   **Good Example:** "Histoplasma GMS stain"
+
+- **BAD:** "Endemic mycoses summary" -> **GOOD:** (Primary: "Endemic mycoses morphology chart", Fallback: "Endemic mycoses")
+- **BAD:** "Immune response" -> **GOOD:** (Primary: "Fungal Th1 immune response diagram", Fallback: "Fungal immune response")
+
+Example of a Perfect Function Call:
+
+{{
+  "name": "create_anki_card",
+  "args": {{
+    "Front": "Define coronary artery dominance. Then, detail the course and primary territories supplied by the Right Coronary Artery (RCA) and the Left Main Coronary Artery's two main branches (LAD and LCx), noting the major clinical consequences of their occlusion.",
+    "Back": "- <pos>Coronary Dominance</pos> is determined by which artery gives rise to the <pos>Posterior Descending Artery (PDA)</pos>, which supplies the posterior 1/3 of the interventricular septum. It is most commonly right-dominant (~85%).\\n\\n- **Right Coronary Artery (RCA):**\\n  - Supplies the <pos>right atrium</pos>, most of the <pos>right ventricle</pos>, and the inferior wall of the left ventricle.\\n  - <neg>Occlusion can cause inferior wall MI and lead to bradycardia</neg> as it supplies the <pos>SA node</pos> (in ~60% of people) and <pos>AV node</pos> (in ~85%).\\n\\n- **Left Main Coronary Artery:**\\n  - Branches into the LAD and LCx.\\n  - **Left Anterior Descending (LAD):** Supplies the <pos>anterior 2/3 of the septum</pos> and the <pos>anterior wall of the left ventricle</pos>. <tip>LAD occlusion is known as the 'widow-maker' MI due to the large territory it supplies.</tip>\\n  - **Left Circumflex (LCx):** Supplies the <pos>lateral and posterior walls of the left ventricle</pos>. <ex>In left-dominant hearts, the LCx gives rise to the PDA.</ex>",
+    "Page_numbers": [92, 93, 94],
+    "Search_Query": "Coronary Arteries illustration"
+  }}
+}}
+
+--- ATOMIC FACTS INPUT ---
+Based on all the rules above, process the following JSON data:
+{atomic_facts_json}
 """
 
 CLOZE_BUILDER_PROMPT = """
-You are an expert in cognitive science creating single-deletion Anki cloze cards. You must adhere to the rules of effective cloze creation to maximize context and minimize ambiguity.
+Role: You are an expert in cognitive science creating single-deletion Anki cloze cards.
 
-GUIDELINES:
-1.  **One Fact Per Card:** Convert every atomic fact into its own flashcard.
-2.  **Strategic Keyword Selection:** Identify the single MOST critical keyword in the sentence. Do not cloze common verbs or articles.
-3.  **Create the Cloze Sentence:** The sentence MUST contain the cloze deletion in the format `{{c1::keyword}}` or `{{c1::keyword::hint}}`.
-4.  **Maximize Context:** The cloze deletion should be in the latter half of the sentence. Bold up to two other important contextual keywords using `<b>keyword</b>` tags.
-5.  **Output Format:** You MUST output the Context Question, the full Sentence HTML, and a concise Image Search Query, separated by `|||`.
+Goal: You will convert EVERY atomic fact provided into its own flashcard by calling the `create_cloze_card` function.
 
-EXAMPLE OUTPUT:
-What is 'intrinsic load' in Cognitive Load Theory?|||
-In <b>Cognitive Load Theory</b>, the mental effort related to the inherent complexity of the material itself is known as {{c1::intrinsic load}}.
-|||intrinsic cognitive load
+Core Rules:
+1.  **One Fact Per Card:** You must process every single fact from the input.
+2.  **Strategic Keyword Selection:** For each fact, identify the single MOST critical keyword to turn into a cloze deletion. Do not cloze common verbs or articles.
+3.  **Create the Cloze Sentence:** The `Sentence_HTML` field MUST contain the cloze deletion in the format `{{c1::keyword}}` or `{{c1::keyword::hint}}`.
+4.  **Maximize Context:** Enhance the sentence by bolding up to two other important contextual keywords using `<b>keyword</b>` tags. The cloze deletion should ideally be in the latter half of the sentence.
+5.  **Context Question:** The `Context_Question` should be a simple question that provides context for the cloze sentence.
+6.  **Image Queries:** You MUST generate two search queries:
+    - "Search_Query": A 2-4 word specific query ending in "diagram", "micrograph", etc.
+    - "Simple_Search_Query": A 1-3 word query with only the most essential keywords.
 
 ATOMIC FACTS WITH PAGE NUMBERS:
 {atomic_facts_with_pages}
 """
 
 CONCEPTUAL_CLOZE_BUILDER_PROMPT = """
-You are an expert in cognitive science, creating multiple-deletion Anki cloze cards. Your primary goal is to deconstruct dense information like lists or processes into sequentially tested parts.
+Role: You are an expert in cognitive science creating multiple-deletion Anki cloze cards.
 
-GUIDELINES:
-1.  **Identify Deconstructable Facts:** Find groups of facts that represent a list, enumeration, or steps in a process.
-2.  **Synthesize into a Single Sentence:** Combine these facts into one cohesive sentence.
-3.  **Use Sequential Clozes:** For each distinct item, use incremental cloze numbers (e.g., `{{c1::...}}`, `{{c2::...}}`, `{{c3::...}}`). This creates separate cards for each item.
+Goal: You will identify groups of facts that represent a list, enumeration, or steps in a process. You will then synthesize these facts into a single cohesive sentence and call the `create_cloze_card` function.
+
+Core Rules:
+1.  **Identify Deconstructable Facts:** Find clusters of 2-5 facts that form a logical sequence or list.
+2.  **Synthesize into a Single Sentence:** Combine these related facts into one sentence.
+3.  **Use Sequential Clozes:** For each distinct item in your synthesized sentence, use incremental cloze numbers (e.g., `{{c1::...}}`, `{{c2::...}}`, `{{c3::...}}`). This creates separate cards for each item in the list.
 4.  **Enhance with Formatting:** Bold any other important contextual keywords that are NOT clozed, using `<b>keyword</b>` syntax.
-5.  **Output Format:** You MUST output the Context Question, the full Sentence HTML, and a concise Image Search Query, separated by `|||`.
-
-EXAMPLE OUTPUT:
-What are the three stages of prenatal development?|||
-The three stages of <b>prenatal development</b> are the {{c1::Zygotic}} stage, the {{c2::Embryonic}} stage, and the {{c3::Fetal}} stage.
-|||prenatal development stages
+5.  **Context Question:** The `Context_Question` should be a question that prompts for the entire list or process.
+6.  **Image Queries:** You MUST generate two search queries:
+    - "Search_Query": A 2-4 word specific query ending in "diagram", "chart", etc.
+    - "Simple_Search_Query": A 1-3 word query with only the most essential keywords from the list.
 
 ATOMIC FACTS WITH PAGE NUMBERS:
 {atomic_facts_with_pages}

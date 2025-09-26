@@ -1,4 +1,4 @@
-﻿# ui.py (With Prompt Editing Tab)
+﻿# ui.py
 
 from pathlib import Path
 from typing import List, Any, Tuple
@@ -8,15 +8,20 @@ from prompts import EXTRACTOR_PROMPT, BUILDER_PROMPT, CLOZE_BUILDER_PROMPT, CONC
 from utils import clear_cache, update_decks_from_files
 from processing import generate_all_decks
 
-def build_ui(version: str, max_decks: int, cache_dirs: Tuple[Path, Path], log_dir: Path, max_log_files: int) -> gr.Blocks:
-    IMAGE_STRATEGY_HELP_TEXT = {
-        "None (Text-Only)": "<strong>Fastest:</strong> Creates text-only cards. No images will be added.",
-        "PDF Only (Fastest, Free)": "<strong>Recommended for Bulk:</strong> Only uses images found in your PDF. Fast and does not use web search quotas.",
-        "PDF Priority (Smart)": "<strong>Best Quality (Default):</strong> Tries to find a high-quality image in your PDF first. If it can't, it falls back to searching Wikimedia for a relevant diagram.",
-        "Wikimedia (Educational, Free)": "<strong>Web Only:</strong> Ignores alll images in the PDF. Searches Wikimedia Commons for relevant, free-to-use educational images and diagrams.",
-    }
+def build_ui(version: str, max_decks: int, cache_dirs: Tuple[Path, Path], log_dir: Path, max_log_files: int, clip_model: Any) -> gr.Blocks:
+    
+    IMAGE_SOURCES = [
+        "PDF (AI Validated)", 
+        "Wikimedia", 
+        "NLM Open-i",
+        "Openverse", 
+        "Flickr"
+    ]
     
     with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="Anki Deck Generator") as app:
+        # Store the pre-loaded model in a non-interactive state component
+        clip_model_state = gr.State(clip_model)
+        
         gr.Markdown(f"# Anki Flashcard Generator\n*(v{version})*")
 
         with gr.Row():
@@ -39,14 +44,10 @@ def build_ui(version: str, max_decks: int, cache_dirs: Tuple[Path, Path], log_di
                             deck_ui_components.extend([acc, deck_title, files])
                             deck_input_components.extend([deck_title, files])
                     
-                    # NEW "Prompts" Tab
                     with gr.TabItem("2. Prompts (Advanced)"):
-                        gr.Markdown("⚠️ **Warning:** Editing these prompts can break the application if the AI's output format is changed. Edit with caution.")
-                        
+                        gr.Markdown("⚠️ **Warning:** Editing prompts can break the application if the AI's output format is changed. Edit with caution.")
                         with gr.Row():
                             reset_prompts_button = gr.Button("Reset All Prompts to Default")
-                            save_prompts_button = gr.Button("Save Prompts", visible=False) # For future use
-                        
                         with gr.Accordion("Fact Extractor Prompt", open=True):
                             extractor_prompt_editor = gr.Textbox(value=EXTRACTOR_PROMPT, lines=10, max_lines=20)
                         with gr.Accordion("Basic Card Builder Prompt", open=False):
@@ -56,12 +57,10 @@ def build_ui(version: str, max_decks: int, cache_dirs: Tuple[Path, Path], log_di
                         with gr.Accordion("Conceptual Cloze Builder Prompt", open=False):
                             conceptual_cloze_builder_prompt_editor = gr.Textbox(value=CONCEPTUAL_CLOZE_BUILDER_PROMPT, lines=10, max_lines=20)
 
-                    # Renamed "System" Tab
                     with gr.TabItem("3. System"):
                          with gr.Accordion("Cache Management", open=False):
                             clear_cache_button = gr.Button("Clear All Caches")
                             cache_status = gr.Textbox(label="Cache Status", interactive=False)
-                         
                          with gr.Accordion("Acknowledgements", open=False):
                             gr.Markdown("This project was built with the invaluable help of the open-source community.")
             
@@ -69,12 +68,13 @@ def build_ui(version: str, max_decks: int, cache_dirs: Tuple[Path, Path], log_di
                 with gr.Group():
                     gr.Markdown("### Core Settings")
                     card_type = gr.Radio(["Conceptual (Basic Cards)", "Atomic Cloze (1 fact/card)", "Conceptual Cloze (Linked facts/card)"], label="Card Type", value="Conceptual (Basic Cards)")
-                    image_strategy = gr.Radio(
-                        ["None (Text-Only)", "PDF Only (Fastest, Free)", "PDF Priority (Smart)", "Wikimedia (Educational, Free)"], 
-                        label="Image Selection Strategy", 
-                        value="PDF Priority (Smart)"
+                    
+                    image_sources = gr.CheckboxGroup(
+                        IMAGE_SOURCES,
+                        label="Image Source Priority & Selection",
+                        info="Select and order sources. The system will try them from top to bottom.",
+                        value=["PDF (AI Validated)", "Wikimedia", "NLM Open-i"]
                     )
-                    image_strategy_help = gr.Markdown(value=IMAGE_STRATEGY_HELP_TEXT["PDF Only (Fastest, Free)"], elem_classes="help-text")
                     
                     enabled_colors = gr.CheckboxGroup(
                         ["positive_key_term", "negative_key_term", "example", "mnemonic_tip"],
@@ -89,24 +89,29 @@ def build_ui(version: str, max_decks: int, cache_dirs: Tuple[Path, Path], log_di
                 log_output = gr.Textbox(label="Progress", lines=30, interactive=False, autoscroll=True)
                 copy_log_button = gr.Button("Copy Log for Debugging")
         
-        # --- EVENT HANDLERS ---
+        # --- Event Handlers ---
         def reset_prompts():
-            return gr.update(value=EXTRACTOR_PROMPT), gr.update(value=BUILDER_PROMPT), gr.update(value=CLOZE_BUILDER_PROMPT), gr.update(value=CONCEPTUAL_CLOZE_BUILDER_PROMPT)
+            return EXTRACTOR_PROMPT, BUILDER_PROMPT, CLOZE_BUILDER_PROMPT, CONCEPTUAL_CLOZE_BUILDER_PROMPT
 
         def update_decks_from_files_ui(files: List[gr.File]) -> List[Any]:
             return update_decks_from_files(files, max_decks)
         
-        def update_help_text_ui(choice):
-            return gr.update(value=IMAGE_STRATEGY_HELP_TEXT.get(choice, ""))
-
         prompt_editors = [extractor_prompt_editor, builder_prompt_editor, cloze_builder_prompt_editor, conceptual_cloze_builder_prompt_editor]
         
         reset_prompts_button.click(fn=reset_prompts, outputs=prompt_editors)
         master_files.change(fn=update_decks_from_files_ui, inputs=master_files, outputs=[master_files] + deck_ui_components)
-        image_strategy.change(fn=update_help_text_ui, inputs=image_strategy, outputs=image_strategy_help)
         clear_cache_button.click(fn=lambda: clear_cache(*cache_dirs), outputs=[cache_status])
 
-        all_gen_inputs = [master_files, generate_button, log_output] + deck_input_components + [card_type, image_strategy, enabled_colors, custom_tags_textbox] + prompt_editors
+        other_settings_and_prompts = [
+        card_type, image_sources, enabled_colors, custom_tags_textbox
+        ] + prompt_editors
+
+        all_gen_inputs = [
+        master_files, generate_button, log_output, clip_model_state
+        ] + deck_input_components + [
+        card_type, image_sources, enabled_colors, custom_tags_textbox
+        ] + prompt_editors
+        
         all_gen_outputs = [log_output, master_files, generate_button]
 
         gen_event = generate_button.click(fn=functools.partial(generate_all_decks, max_decks), inputs=all_gen_inputs, outputs=all_gen_outputs)

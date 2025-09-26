@@ -1,0 +1,13 @@
+.\processing.py:3:1: F401 'base64' imported but unused
+.\processing.py:8:1: F401 'concurrent.futures.ThreadPoolExecutor' imported but unused
+.\processing.py:9:1: F401 'collections.deque' imported but unused
+.\processing.py:12:1: F401 'prompts.EXTRACTOR_PROMPT' imported but unused
+.\processing.py:12:1: F401 'prompts.BUILDER_PROMPT' imported but unused
+.\processing.py:12:1: F401 'prompts.CLOZE_BUILDER_PROMPT' imported but unused
+.\processing.py:12:1: F401 'prompts.CONCEPTUAL_CLOZE_BUILDER_PROMPT' imported but unused
+.\processing.py:243:18: F541 f-string is missing placeholders
+.\processing.py:313:22: F541 f-string is missing placeholders
+.\processing.py:337:22: F541 f-string is missing placeholders
+.\processing.py:382:34: F541 f-string is missing placeholders
+.\test_suite.py:18:6: E999 SyntaxError: invalid syntax
+.\verify_tesseract.py:30:11: F541 f-string is missing placeholders
